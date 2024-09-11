@@ -7,11 +7,8 @@ import shutil
 from os import path
 from setuptools import find_packages, setup
 from typing import List
-import torch
-from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
-
-torch_ver = [int(x) for x in torch.__version__.split(".")[:2]]
-assert torch_ver >= [1, 8], "Requires PyTorch >= 1.8"
+from setuptools.command.build_ext import build_ext
+import subprocess
 
 
 def get_version():
@@ -38,6 +35,18 @@ def get_version():
 
 
 def get_extensions():
+    # Try importing torch only after installation has occurred.
+    try:
+        import torch
+        from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
+    except ImportError:
+        # PyTorch is not installed yet, skip building extensions
+        print("PyTorch is not installed yet. Skipping extension building.")
+        return []
+
+    torch_ver = [int(x) for x in torch.__version__.split(".")[:2]]
+    assert torch_ver >= [1, 8], "Requires PyTorch >= 1.8"
+
     this_dir = path.dirname(path.abspath(__file__))
     extensions_dir = path.join(this_dir, "detectron2", "layers", "csrc")
 
@@ -52,7 +61,6 @@ def get_extensions():
     if is_rocm_pytorch:
         assert torch_ver >= [1, 8], "ROCM support requires PyTorch >= 1.8!"
 
-    # common code between cuda and rocm platforms, for hipify version [1,0,0] and later.
     source_cuda = glob.glob(path.join(extensions_dir, "**", "*.cu")) + glob.glob(
         path.join(extensions_dir, "*.cu")
     )
@@ -86,12 +94,6 @@ def get_extensions():
         if nvcc_flags_env != "":
             extra_compile_args["nvcc"].extend(nvcc_flags_env.split(" "))
 
-        if torch_ver < [1, 7]:
-            # supported by https://github.com/pytorch/pytorch/pull/43931
-            CC = os.environ.get("CC", None)
-            if CC is not None:
-                extra_compile_args["nvcc"].append("-ccbin={}".format(CC))
-
     include_dirs = [extensions_dir]
 
     ext_modules = [
@@ -113,14 +115,11 @@ def get_model_zoo_configs() -> List[str]:
     detectron2/model_zoo.
     """
 
-    # Use absolute paths while symlinking.
     source_configs_dir = path.join(path.dirname(path.realpath(__file__)), "configs")
     destination = path.join(
         path.dirname(path.realpath(__file__)), "detectron2", "model_zoo", "configs"
     )
-    # Symlink the config directory inside package to have a cleaner pip install.
 
-    # Remove stale symlink/directory from a previous build.
     if path.exists(source_configs_dir):
         if path.islink(destination):
             os.unlink(destination)
@@ -131,13 +130,29 @@ def get_model_zoo_configs() -> List[str]:
         try:
             os.symlink(source_configs_dir, destination)
         except OSError:
-            # Fall back to copying if symlink fails: ex. on Windows.
             shutil.copytree(source_configs_dir, destination)
 
     config_paths = glob.glob("configs/**/*.yaml", recursive=True) + glob.glob(
         "configs/**/*.py", recursive=True
     )
     return config_paths
+
+
+# Custom command class to install torch and torchvision if not present
+class InstallTorchDeps(build_ext):
+    def run(self):
+        try:
+            import torch
+            import torchvision
+        except ImportError:
+            # Install torch and torchvision if they are not installed
+            subprocess.check_call([self._get_python_exec(), "-m", "pip", "install", "torch", "torchvision"])
+
+        # Proceed with the normal build_ext command
+        super().run()
+
+    def _get_python_exec(self):
+        return os.environ.get("PYTHON_EXEC", "python")
 
 
 # For projects that are relative small and provide features that are very close
@@ -153,59 +168,39 @@ setup(
     version=get_version(),
     author="FAIR",
     url="https://github.com/facebookresearch/detectron2",
-    description="Detectron2 is FAIR's next-generation research "
-    "platform for object detection and segmentation.",
+    description="Detectron2 is FAIR's next-generation research platform for object detection and segmentation.",
     packages=find_packages(exclude=("configs", "tests*")) + list(PROJECTS.keys()),
     package_dir=PROJECTS,
     package_data={"detectron2.model_zoo": get_model_zoo_configs()},
     python_requires=">=3.7",
     install_requires=[
-        # These dependencies are not pure-python.
-        # In general, avoid adding dependencies that are not pure-python because they are not
-        # guaranteed to be installable by `pip install` on all platforms.
-        "Pillow>=7.1",  # or use pillow-simd for better performance
-        "matplotlib",  # TODO move it to optional after we add opencv visualization
-        "pycocotools>=2.0.2",  # corresponds to https://github.com/ppwwyyxx/cocoapi
-        # Do not add opencv here. Just like pytorch, user should install
-        # opencv themselves, preferrably by OS's package manager, or by
-        # choosing the proper pypi package name at https://github.com/skvark/opencv-python
-        # Also, avoid adding dependencies that transitively depend on pytorch or opencv.
-        # ------------------------------------------------------------
-        # The following are pure-python dependencies that should be easily installable.
-        # But still be careful when adding more: fewer people are able to use the software
-        # with every new dependency added.
+        "Pillow>=7.1",
+        "matplotlib",
+        "pycocotools>=2.0.2",
         "termcolor>=1.1",
         "yacs>=0.1.8",
         "tabulate",
         "cloudpickle",
         "tqdm>4.29.0",
         "tensorboard",
-        # Lock version of fvcore/iopath because they may have breaking changes
-        # NOTE: when updating fvcore/iopath version, make sure fvcore depends
-        # on compatible version of iopath.
-        "fvcore>=0.1.5,<0.1.6",  # required like this to make it pip installable
+        "fvcore>=0.1.5,<0.1.6",
         "iopath>=0.1.7,<0.1.10",
         "dataclasses; python_version<'3.7'",
         "omegaconf>=2.1,<2.4",
         "hydra-core>=1.1",
         "black",
         "packaging",
-        # NOTE: When adding new dependencies, if it is required at import time (in addition
-        # to runtime), it probably needs to appear in docs/requirements.txt, or as a mock
-        # in docs/conf.py
     ],
     extras_require={
-        # optional dependencies, required by some features
         "all": [
             "fairscale",
-            "timm",  # Used by a few ViT models.
+            "timm",
             "scipy>1.5.1",
             "shapely",
             "pygments>=2.2",
             "psutil",
             "panopticapi @ https://github.com/cocodataset/panopticapi/archive/master.zip",
         ],
-        # dev dependencies. Install them by `pip install 'detectron2[dev]'`
         "dev": [
             "flake8==3.8.1",
             "isort==4.3.21",
@@ -215,5 +210,5 @@ setup(
         ],
     },
     ext_modules=get_extensions(),
-    cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension},
+    cmdclass={"build_ext": InstallTorchDeps},
 )
