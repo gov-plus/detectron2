@@ -146,7 +146,7 @@ class InstallTorchDeps(build_ext):
             import torchvision
         except ImportError:
             # Install torch and torchvision if they are not installed
-            subprocess.check_call([self._get_python_exec(), "-m", "pip", "install", "torch", "torchvision"])
+            subprocess.check_call([self._get_python_exec(), "-m", "pip", "install", "torch", "torchvision", "opencv-python"])
 
         # Proceed with the normal build_ext command
         super().run()
